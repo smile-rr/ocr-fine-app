@@ -1,0 +1,38 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocr-fine-app:latest
+    container_name: ocr-fine-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # 模型挂载（合并后的 HF 格式）
+      - ./models:/app/models:ro
+      # 向量库持久化
+      - chroma_data:/app/chroma_db
+      # HF cache（避免每次重启重新下 embedder）
+      - hf_cache:/app/.cache/huggingface
+    environment:
+      DEVICE: cpu              # 改 cuda 需换 CUDA base 镜像
+      ENABLE_STAGE1: "1"       # 0 关闭 VLM，节省 3GB+ 内存
+      MAX_TOKENS: "512"
+      STAGE1_MODEL_PATH: /app/models/stage1_fused
+      STAGE2_MODEL_PATH: /app/models/stage2_fused
+      EMBED_MODEL: BAAI/bge-small-zh-v1.5
+      # 热加载配置
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-change-me-in-prod}
+      AUTO_RELOAD: "1"         # 监听 /app/models 变化自动 reload（配合 volume 挂载）
+    restart: unless-stopped
+    # 至少给 6GB（VLM 2B fp32 就需要 ~5GB）
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+        reservations:
+          memory: 4g
+
+volumes:
+  chroma_data:
+  hf_cache:

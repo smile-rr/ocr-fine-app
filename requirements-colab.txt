@@ -1,0 +1,14 @@
+# Colab T4/A100 专用（有 CUDA）
+# 在 Colab notebook 里用 !pip install -r requirements-colab.txt 安装
+unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+bitsandbytes>=0.43.0
+trl>=0.11.0
+peft>=0.13.0
+accelerate>=1.0.0
+transformers>=4.45.0
+datasets>=3.0.0
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+pandas>=2.1.0
+sentence-transformers>=3.0.0
+chromadb>=0.5.0

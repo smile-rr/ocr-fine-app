@@ -1,0 +1,69 @@
+[project]
+name = "ocr-fine-app"
+version = "0.1.0"
+description = "QLoRA document intelligence + table RAG (MacBook-friendly)"
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    # 核心 ML（Apple Silicon 本地）
+    "mlx>=0.21.0",
+    "mlx-lm>=0.21.0",
+    "mlx-vlm>=0.1.15",
+
+    # HuggingFace 生态
+    "transformers>=4.45.0",
+    "datasets>=3.0.0",
+    "huggingface-hub>=0.26.0",
+    "accelerate>=1.0.0",
+    "peft>=0.13.0",
+    "sentencepiece>=0.2.0",
+
+    # 文档处理
+    "pymupdf>=1.24.0",
+    "pdfplumber>=0.11.0",
+    "Pillow>=10.0.0",
+
+    # 视觉（Qwen2-VL 的 processor 经 transformers 调用 Qwen2VLVideoProcessor，
+    # 需要 torchvision；即便只用静态图也要装）
+    "torchvision>=0.16.0",
+
+    # 表格/数据
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+
+    # 向量库 & embedding
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+
+    # 评估
+    "rouge-score>=0.1.2",
+    "editdistance>=0.8.0",
+
+    # UI
+    "streamlit>=1.39.0",
+
+    # Jupyter
+    "jupyter>=1.1.0",
+    "ipywidgets>=8.1.0",
+    "matplotlib>=3.9.0",
+    "tqdm>=4.66.0",
+
+    # 部署/热加载
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.12",
+    "watchdog>=5.0.0",
+]
+
+[project.optional-dependencies]
+# Colab/CUDA 环境：uv sync --extra colab
+colab = [
+    "bitsandbytes>=0.43.0",
+    "trl>=0.11.0",
+]
+# 非 Apple Silicon 本地：uv sync --extra no-mlx
+# （先从 dependencies 移除 mlx 再用。这里保留说明；实际请手动编辑。）
+
+[tool.uv]
+# 让 uv 更好地处理 torch 等大包
+package = false
