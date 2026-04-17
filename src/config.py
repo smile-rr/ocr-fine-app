@@ -21,6 +21,10 @@ STAGE2_LLM_MLX = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
 EMBED_MODEL = "BAAI/bge-small-zh-v1.5"  # 轻量中文 embedding (~95MB)
 
+# Stage 2 v2（演示热加载 / 同任务不同模型对比；不需要微调）
+STAGE2_LLM_MLX_V2 = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+STAGE2_LLM_HF_V2  = "Qwen/Qwen2.5-1.5B-Instruct"
+
 # LoRA 产物路径
 STAGE1_ADAPTER = MODELS_DIR / "stage1_adapter"
 STAGE2_ADAPTER = MODELS_DIR / "stage2_adapter"

@@ -5,6 +5,9 @@ __pycache__/
 data/raw/
 data/hf_cache/
 data/samples/*.pdf
+data/uploads/
+stage1_colab.zip
+stage2_colab.zip
 models/
 logs/
 chroma_db/

@@ -172,7 +172,126 @@ ocr-fine-app/
 
 ---
 
+## 🎭 快速演示模式（跳过训练）
+
+微调不是前置条件 —— 代码里 `adapter=None` 就走基座，你可以先**只用基座模型**跑通整条流水线和验证热加载，回头再补训练。
+
+### Path A · Streamlit UI（本地，MLX，零额外设置）
+
+`app/streamlit_app.py` 里「使用微调 LoRA」勾选框在 adapter 不存在时自动关闭 → `infer.py` 用 `adapter=None` → 直接跑基座。
+
+```bash
+uv run streamlit run app/streamlit_app.py
+```
+
+首次点「开始抽取」/「提问」时会**自动从 HF 拉 MLX 4bit 基座**（`mlx-community/Qwen2-VL-2B-Instruct-4bit` + `Qwen2.5-0.5B-Instruct-4bit`），之后 `lru_cache` 复用。
+
+**四个 Tab 都可用（不需要微调）**：
+
+| Tab | 功能 | 免训练能跑？ |
+|---|---|---|
+| 📤 上传与抽取 | pdfplumber + **VLM 图片抽表**（勾侧栏「启用 VLM 抽表」）| ✅ 基座 VLM 直出 Markdown |
+| 📊 表格查看 | 查看 pdfplumber vs VLM 并列结果 | ✅ 两种来源内建对比 |
+| 💬 RAG 问答 | 向量检索 + LLM 回答 | ✅ 基座 LLM |
+| 🆚 模型对比 | **v1 vs v2 两个基座并排**（默认） 或 基座 vs LoRA（有 adapter 时） | ✅ `Qwen2.5-0.5B` vs `Qwen2.5-1.5B` |
+
+Tab 4 的「v1 vs v2」模式跟 Docker 热加载演示一致：左侧 0.5B、右侧 1.5B，同一 RAG 问题能看到答案长度和完整度差异。两个 MLX 模型会并存在 `lru_cache` 里（各约 0.4GB / 1GB 4-bit）。
+
+### Path B · Docker API + 热加载演示
+
+这条路走 HF transformers（跨平台）。需要先把 base 模型拉成 `models/stageX_fused/` 目录，Docker 服务启动就能加载。
+
+**1. 一键下载 base 模型**
+
+```bash
+# 最小集：只下 stage2_fused (~1GB)，不加载 VLM
+bash scripts/setup_demo_models.sh
+
+# 完整 demo：三个都下（stage2 v1 + v2 + stage1 VLM，共 ~8GB）
+bash scripts/setup_demo_models.sh --all
+
+# 只想演示热加载：stage2 v1 + v2（不要 VLM）
+bash scripts/setup_demo_models.sh --v2
+```
+
+**2. 启动 API 服务**
+
+```bash
+# 只跑 stage2（没下 VLM 就这么跑，省 ~3GB 内存）
+ENABLE_STAGE1=0 docker compose up --build -d
+
+# 或者完整模式（需要 --stage1 下过 VLM）
+docker compose up --build -d
+
+# 看启动日志确认模型加载成功
+docker compose logs -f api
+```
+
+**3. 走一遍基本流程**
+
+```bash
+# 健康检查，看到 versions 里的指纹
+curl -s http://localhost:8000/health | jq .
+
+# 直接灌一个 markdown 表进向量库（不依赖 VLM）
+curl -X POST http://localhost:8000/ingest_markdown \
+  -F 'doc_id=demo' -F 'page=1' -F 'markdown=| 年份 | 营收 | 净利润 |
+|---|---|---|
+| 2022 | 100 | 15 |
+| 2023 | 120 | 18 |
+| 2024 | 135 | 22 |'
+
+# 问答（基座模型 · v1）
+curl -X POST http://localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"哪一年净利润最高？","doc_filter":"demo"}' | jq .
+```
+
+**4. 热加载 v1 → v2（核心演示）**
+
+```bash
+# 不停机切换到 v2 (1.5B)，不用重启容器
+curl -X POST http://localhost:8000/admin/reload \
+  -H "X-Admin-Key: ${ADMIN_API_KEY:-change-me-in-prod}" \
+  -H 'Content-Type: application/json' \
+  -d '{"stage":2,"path":"/app/models/stage2_fused_v2","force":true}' | jq .
+
+# 再看 /health，version 指纹应该变了
+curl -s http://localhost:8000/health | jq .versions
+
+# 问同一个问题，v2 (1.5B) 答案明显更完整
+curl -X POST http://localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"哪一年净利润最高？","doc_filter":"demo"}' | jq .
+
+# 切回 v1
+curl -X POST http://localhost:8000/admin/reload \
+  -H "X-Admin-Key: ${ADMIN_API_KEY:-change-me-in-prod}" \
+  -d '{"stage":2,"path":"/app/models/stage2_fused","force":true}'
+```
+
+**看点**：
+- `/health.versions.stage2` 的 SHA1 指纹前后不同 → CD pipeline 可以据此 assert 新版上线
+- 切换过程中 **旧请求不中断**（API 用 `threading.RLock` + 原子引用替换）
+- 内存峰值 ≈ `max(v1) + max(v2)` 短暂并存 → 1.5B 切换时约 4GB（`docker-compose.yml` 里 limit 已设 8g）
+- 完整实现见 `src/serve/api.py` 的 `_swap_model` 和 `_reload_if_changed`
+
+**5. 自动监听目录变化（可选）**
+
+`docker-compose.yml` 已开 `AUTO_RELOAD=1`：用 `watchdog` 监听 `/app/models` 目录 mtime 变化 → 检测到新文件 3s 后自动 reload。真实 CD pipeline 里你只需 `rsync` 新权重到挂载目录，API 自己就切过去了。
+
+```bash
+# 模拟 CD：改一下 v2 的文件 mtime
+touch models/stage2_fused_v2/config.json
+# 看 API 日志里的 🔁 自动重载
+docker compose logs --tail 20 -f api
+```
+
+---
+
 ## 🚀 操作步骤
+
+> 下面是「**完整流程**」，包含数据准备 + 微调训练。只想快速验证跳过训练 → 上面 🎭 Demo 模式即可。
 
 ### Step 0 · 环境初始化（5 分钟）
 

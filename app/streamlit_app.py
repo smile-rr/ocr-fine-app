@@ -160,12 +160,24 @@ with tab_qa:
 
 # ========== Tab 4: Before/After ==========
 with tab_compare:
-    st.write("同一问题下，基线模型 vs 微调模型的输出对比。")
+    st.write("同一问题下，两个模型的输出并排对比。")
+    st.caption("💡 本 Tab 自包含 —— 左侧 sidebar 的「微调 LoRA」勾选对这里无效，"
+               "两边模型完全由下方 radio 决定。")
     if not st.session_state.current_doc:
         st.info("先处理一个 PDF。")
     else:
+        # 模式选择：默认「v1 vs v2」不需要微调；有 adapter 时可切「base vs LoRA」
+        has_adapter = C.STAGE2_ADAPTER.exists()
+        modes = {"🔀 v1 vs v2（不同尺寸基座）": "v1_v2"}
+        if has_adapter:
+            modes["🎯 基座 vs LoRA（微调前后）"] = "base_lora"
+        mode_label = st.radio("对比模式", list(modes.keys()), horizontal=True,
+                              key="compare_mode")
+        mode = modes[mode_label]
+
         q = st.text_input("问题", key="compare_q",
                           value="表格中数值最大的一项是什么？")
+
         if q and st.button("对比生成", key="compare_btn"):
             from src.infer import chat
             store = get_store()
@@ -173,14 +185,33 @@ with tab_compare:
             msgs = build_rag_prompt(q, hits)
 
             col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("基线 (base)")
-                with st.spinner("生成中..."):
-                    st.markdown(chat(msgs, adapter=None, max_tokens=400))
-            with col2:
-                st.subheader("微调 (LoRA)")
-                if not C.STAGE2_ADAPTER.exists():
-                    st.warning("stage2_adapter 不存在，先在 notebook 03 训练。")
-                else:
+            if mode == "v1_v2":
+                v1_name = C.STAGE2_LLM_MLX.split("/")[-1]
+                v2_name = C.STAGE2_LLM_MLX_V2.split("/")[-1]
+                with col1:
+                    st.subheader(f"v1 · {v1_name}")
+                    st.caption("0.5B · 快 · 简短")
                     with st.spinner("生成中..."):
-                        st.markdown(chat(msgs, adapter=str(C.STAGE2_ADAPTER), max_tokens=400))
+                        st.markdown(chat(msgs, adapter=None, max_tokens=400))
+                with col2:
+                    st.subheader(f"v2 · {v2_name}")
+                    st.caption("1.5B · 首次加载约 30–60s · 答案更完整")
+                    with st.spinner("生成中..."):
+                        try:
+                            st.markdown(chat(msgs, adapter=None,
+                                             model_id=C.STAGE2_LLM_MLX_V2,
+                                             max_tokens=400))
+                        except Exception as e:
+                            st.error(f"加载 v2 失败：{e}\n\n"
+                                     f"确认 MLX 能访问 `{C.STAGE2_LLM_MLX_V2}`，"
+                                     "或在 src/config.py 改成你本地已有的 MLX 模型。")
+            else:  # base_lora
+                with col1:
+                    st.subheader("基线 (base)")
+                    with st.spinner("生成中..."):
+                        st.markdown(chat(msgs, adapter=None, max_tokens=400))
+                with col2:
+                    st.subheader("微调 (LoRA)")
+                    with st.spinner("生成中..."):
+                        st.markdown(chat(msgs, adapter=str(C.STAGE2_ADAPTER),
+                                         max_tokens=400))
