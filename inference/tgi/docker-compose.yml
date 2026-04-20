@@ -1,0 +1,41 @@
+# TGI (Text Generation Inference) 参考配置
+# 前置: NVIDIA GPU + nvidia-container-toolkit
+# 启动: docker compose up -d
+
+services:
+  tgi:
+    image: ghcr.io/huggingface/text-generation-inference:2.4.0
+    container_name: tgi-stage2
+    ports:
+      - "8080:80"
+    volumes:
+      - hf_cache:/data
+      # 本地模型挂载（可选）
+      # - ../../models:/models:ro
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    command: >
+      --model-id Qwen/Qwen2.5-7B-Instruct
+      --max-input-length 4096
+      --max-total-tokens 8192
+      --max-batch-prefill-tokens 4096
+      --dtype bfloat16
+      --num-shard 1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 4g                     # TGI 要求 > 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+volumes:
+  hf_cache:

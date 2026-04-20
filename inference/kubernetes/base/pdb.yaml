@@ -1,0 +1,10 @@
+# PodDisruptionBudget —— 防止集群 drain / 升级时一次性把副本全 kill
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm
+spec:
+  minAvailable: 1              # 任何时刻至少 1 个副本可用
+  selector:
+    matchLabels:
+      app: vllm

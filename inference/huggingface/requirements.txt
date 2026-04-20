@@ -1,0 +1,11 @@
+torch>=2.3.0
+transformers>=4.45.0
+accelerate>=1.0.0
+peft>=0.13.0
+
+# 部署示例
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# 可选 (QLoRA adapter 的推理)
+# bitsandbytes>=0.43.0 ; sys_platform == "linux"

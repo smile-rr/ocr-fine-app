@@ -1,0 +1,65 @@
+# vLLM 推理服务（参考配置）
+# 前置:
+#   - NVIDIA GPU + driver >= 535
+#   - nvidia-container-toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+# 启动:
+#   docker compose up -d
+# 验证:
+#   curl http://localhost:8000/v1/models
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest        # 官方镜像 ~14GB
+    container_name: vllm-stage2
+    ports:
+      - "8000:8000"
+    volumes:
+      # 选项 A: 从 HF 自动下载，缓存到本地
+      - hf_cache:/root/.cache/huggingface
+      # 选项 B: 用本项目合并后的模型（取消下面的注释）
+      # - ../../models:/models:ro
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}   # 需要下载门禁模型时填
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+    # 默认跑 Qwen2.5-7B；本项目小模型改成 Qwen/Qwen2.5-0.5B-Instruct 就行
+    command: >
+      --model Qwen/Qwen2.5-7B-Instruct
+      --served-model-name qwen2.5-7b
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --gpu-memory-utilization 0.9
+      --max-model-len 8192
+      --dtype bfloat16
+      --enable-chunked-prefill
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all              # 或 count: 2 指定 2 卡
+              capabilities: [gpu]
+    ipc: host                         # vLLM 多 worker 要共享内存
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\").read()'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s              # 大模型加载要时间
+
+  # 可选：带 Web UI 的 OpenAI 兼容测试客户端
+  # openwebui:
+  #   image: ghcr.io/open-webui/open-webui:main
+  #   container_name: vllm-webui
+  #   ports: ["3000:8080"]
+  #   environment:
+  #     - OPENAI_API_BASE_URL=http://vllm:8000/v1
+  #     - OPENAI_API_KEY=dummy
+  #   volumes:
+  #     - openwebui_data:/app/backend/data
+  #   depends_on: [vllm]
+
+volumes:
+  hf_cache:
+  # openwebui_data:

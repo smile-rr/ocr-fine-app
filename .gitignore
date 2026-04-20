@@ -15,3 +15,23 @@ outputs/
 .DS_Store
 .env
 *.egg-info/
+
+# 企业级参考工具 clone 出来的第三方代码和产物
+finetuning/llamafactory/LLaMA-Factory/
+finetuning/axolotl/axolotl/
+finetuning/*/logs/
+finetuning/*/outputs/
+inference/ollama/.llamacpp_tmp/
+inference/ollama/*.gguf
+
+# Terraform / Bicep 产物
+cloud/**/.terraform/
+cloud/**/.terraform.lock.hcl
+cloud/**/terraform.tfstate*
+cloud/**/*.tfvars
+cloud/**/*.tfplan
+cloud/**/parameters.json
+
+# HF 独立 venv
+finetuning/huggingface/.venv/
+inference/huggingface/.venv/

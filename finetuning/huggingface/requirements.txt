@@ -1,0 +1,22 @@
+torch>=2.3.0
+transformers>=4.45.0
+datasets>=3.0.0
+peft>=0.13.0
+accelerate>=1.0.0
+trl>=0.11.0
+
+# QLoRA (Linux + CUDA)
+bitsandbytes>=0.43.0 ; sys_platform == "linux"
+
+# 可选：flash attention (Ampere/Hopper 才有效)
+# flash-attn>=2.6.0
+
+# 训练指标 / 评估
+evaluate>=0.4.0
+rouge-score>=0.1.2
+sentencepiece>=0.2.0
+tensorboard>=2.17.0
+
+# 常用工具
+numpy>=1.26.0
+pandas>=2.1.0

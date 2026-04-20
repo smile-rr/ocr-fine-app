@@ -1,0 +1,130 @@
+# 用 Rollout 替代原生 Deployment 做金丝雀发布
+# 前置: kubectl apply -n argo-rollouts -f https://.../install.yaml
+# 对比 base/deployment-vllm.yaml —— spec.template 完全一样，只是外层换成 Rollout + 加 strategy
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vllm
+  namespace: ocr-inference
+spec:
+  replicas: 4
+  strategy:
+    canary:
+      # 金丝雀流量入口（Service 指向 stable 还是 canary）
+      canaryService: vllm-canary
+      stableService: vllm-stable
+      trafficRouting:
+        # 用 Istio / Traefik / Nginx Ingress 都行；这里示范 Istio
+        istio:
+          virtualService:
+            name: vllm-vs
+            routes: [primary]
+      # 金丝雀发布步骤
+      steps:
+        - setWeight: 10              # 10% 流量到新版本
+        - pause: { duration: 5m }    # 观察 5 分钟
+        - analysis:                  # 自动分析指标
+            templates:
+              - templateName: vllm-success-rate
+              - templateName: vllm-latency-p99
+        - setWeight: 25
+        - pause: { duration: 10m }
+        - analysis:
+            templates:
+              - templateName: vllm-success-rate
+              - templateName: vllm-latency-p99
+        - setWeight: 50
+        - pause: { duration: 15m }
+        - setWeight: 100
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      nodeSelector:
+        accelerator: nvidia-gpu
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - /models/stage2_fused
+            - --enable-lora
+            - --max-loras
+            - "4"
+            # 其它参数同 base
+          resources:
+            limits: { nvidia.com/gpu: 1, memory: 24Gi }
+            requests: { nvidia.com/gpu: 1, memory: 16Gi }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 120
+
+---
+# 两个 Service: stable / canary，给 trafficRouting 用
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-stable
+  namespace: ocr-inference
+spec:
+  selector: { app: vllm }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-canary
+  namespace: ocr-inference
+spec:
+  selector: { app: vllm }
+  ports: [{ port: 8000, targetPort: 8000 }]
+
+---
+# AnalysisTemplate: 金丝雀期间的自动健康检查
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: vllm-success-rate
+  namespace: ocr-inference
+spec:
+  metrics:
+    - name: success-rate
+      interval: 30s
+      count: 5
+      successCondition: result[0] >= 0.95
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc:9090
+          query: |
+            sum(rate(vllm_requests_total{status=~"2..",service="vllm-canary"}[1m]))
+            /
+            sum(rate(vllm_requests_total{service="vllm-canary"}[1m]))
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: vllm-latency-p99
+  namespace: ocr-inference
+spec:
+  metrics:
+    - name: latency-p99
+      interval: 30s
+      count: 5
+      successCondition: result[0] < 5000    # p99 < 5s
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc:9090
+          query: |
+            histogram_quantile(0.99,
+              sum(rate(vllm_request_duration_ms_bucket{service="vllm-canary"}[1m]))
+              by (le)
+            )

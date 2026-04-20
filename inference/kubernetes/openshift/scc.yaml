@@ -1,0 +1,71 @@
+# 给 vllm-runner ServiceAccount 分配非 root SCC
+# OpenShift 默认 restricted-v2 SCC 不允许 vllm 镜像的默认行为，需要明确授权
+#
+# 安装:
+#   oc apply -f scc.yaml
+#
+# 等价 CLI:
+#   oc adm policy add-scc-to-user nonroot-v2 -z vllm-runner -n ocr-inference
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-runner
+  namespace: ocr-inference
+
+---
+# RoleBinding 授权使用 nonroot-v2 SCC
+# nonroot-v2 是 OpenShift 内置 SCC，拒绝 root，但允许常规 cap
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-runner-nonroot-scc
+  namespace: ocr-inference
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:nonroot-v2
+subjects:
+  - kind: ServiceAccount
+    name: vllm-runner
+    namespace: ocr-inference
+
+---
+# 如果 nonroot-v2 还是限制太严（比如 vllm 要求 fsGroup），
+# 可以创建自定义 SCC（需要 cluster-admin）
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: vllm-scc
+  annotations:
+    kubernetes.io/description: "给 vLLM 定制的 SCC：非 root + fsGroup 任意"
+allowPrivilegedContainer: false
+allowPrivilegeEscalation: false
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+readOnlyRootFilesystem: false         # vLLM 要写 /tmp/triton_cache
+runAsUser:
+  type: MustRunAsRange
+  uidRangeMin: 1000
+  uidRangeMax: 65535
+seLinuxContext:
+  type: MustRunAs
+fsGroup:
+  type: RunAsAny                      # 让 PVC 访问权限不挡路
+supplementalGroups:
+  type: RunAsAny
+allowedCapabilities: []
+requiredDropCapabilities:
+  - ALL
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - persistentVolumeClaim
+  - projected
+  - secret
+users:
+  - system:serviceaccount:ocr-inference:vllm-runner

@@ -1,0 +1,50 @@
+# ⭐ NetworkPolicy —— 第二道防线：
+# 就算 Service 不小心改成 LoadBalancer，这条策略也只放行指定来源
+# 前提：集群装了网络插件支持 NetworkPolicy (Calico / Cilium / Weave；EKS 默认要显式开)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vllm-deny-default
+spec:
+  podSelector:
+    matchLabels:
+      app: vllm
+  policyTypes:
+    - Ingress
+  ingress:
+    # 允许：业务层 app-layer 调用（推理）
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ocr-app
+          podSelector:
+            matchLabels:
+              app: app-layer
+      ports:
+        - protocol: TCP
+          port: 8000
+
+    # 允许：adapter-controller（本 namespace 内，专门做 LoRA 热加载）
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ocr-inference
+          podSelector:
+            matchLabels:
+              app: adapter-controller
+      ports:
+        - protocol: TCP
+          port: 8000
+
+    # 允许：Prometheus 刮指标
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8000
+  # 注意：没有 from 就是 deny-all，上面任何一条不匹配都拒绝

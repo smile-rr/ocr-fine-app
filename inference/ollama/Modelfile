@@ -1,0 +1,29 @@
+# Ollama Modelfile for stage2 RAG QA 模型
+# 用法:
+#   1. 先跑 scripts/hf_to_gguf.sh 把 models/stage2_fused/ 转成 stage2-q4_k_m.gguf
+#   2. ollama create ocr-stage2 -f Modelfile
+#   3. ollama run ocr-stage2
+#
+# 参考: https://github.com/ollama/ollama/blob/main/docs/modelfile.md
+
+FROM ./stage2-q4_k_m.gguf
+
+# Qwen2.5 官方 chat template (chatml 变种)
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+
+SYSTEM """你是一个精确的数据分析助手。规则：
+1. 只基于给定的表格数据回答，不要引入外部知识
+2. 答案必须包含具体数值，并注明数据来源（文档/页/行）
+3. 数据不足时直接说明"数据不足"，不要猜测
+4. 涉及计算时展示计算过程"""
+
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+PARAMETER num_ctx 4096
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"

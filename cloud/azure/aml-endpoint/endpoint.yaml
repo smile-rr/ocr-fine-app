@@ -1,0 +1,6 @@
+# az ml CLI YAML - 更贴近日常运维
+# 用法: az ml online-endpoint create -f endpoint.yaml --workspace-name ocr-aml-ws
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineEndpoint.schema.json
+name: ocr-stage2
+auth_mode: aml_token           # aml_token / key / aad_token
+description: Stage 2 LLM RAG QA endpoint

@@ -1,0 +1,94 @@
+# ============================================================
+# Stage 2: Qwen2.5-0.5B-Instruct QLoRA (Axolotl 版)
+# 数据：ocr-fine-app/data/stage2_train/train.jsonl (alpaca 格式)
+# ============================================================
+
+# ---- 模型 ----
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+trust_remote_code: true
+
+# ---- Adapter 类型 ----
+# 可选：lora / qlora / relora / galore / full（不给就是全参数）
+adapter: qlora
+load_in_4bit: true            # QLoRA 4-bit 量化；全 LoRA 去掉此行 + adapter 改 lora
+# load_in_8bit: true          # 或 8-bit，显存更宽但精度更好
+
+# ---- LoRA 超参 ----
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_linear: true      # 所有 linear 层；或显式：
+# lora_target_modules:
+#   - q_proj
+#   - k_proj
+#   - v_proj
+#   - o_proj
+#   - gate_proj
+#   - up_proj
+#   - down_proj
+
+# ---- 量化细节 ----
+bnb_4bit_quant_type: nf4      # nf4 / fp4
+bnb_4bit_use_double_quant: true
+bnb_4bit_compute_dtype: bfloat16
+
+# ---- 数据集 ----
+# path 相对工作目录 (即 axolotl/ 目录)
+datasets:
+  - path: ../../../data/stage2_train/train.jsonl
+    type: alpaca              # alpaca / sharegpt / chatml / completion 等
+    ds_type: json             # 显式指定 HF datasets 加载格式
+dataset_prepared_path: ./cache/prepared
+val_set_size: 0.05            # 从 train 切 5% 做 eval
+output_dir: ./outputs/stage2_qlora
+
+# ---- 序列 / batching ----
+sequence_len: 2048
+sample_packing: true          # 多样本拼接（Axolotl 强项，吞吐 2-3×）
+eval_sample_packing: false    # eval 时关，保持指标稳定
+pad_to_sequence_len: true
+
+# ---- 训练超参 ----
+micro_batch_size: 2
+gradient_accumulation_steps: 8  # 有效 batch = 16
+num_epochs: 3
+optimizer: adamw_bnb_8bit       # 8-bit Adam 省显存；或 adamw_torch / paged_adamw_8bit
+lr_scheduler: cosine
+learning_rate: 0.0002
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# ---- 精度 ----
+bf16: true                     # 推荐；不支持的显卡用 fp16: true
+fp16:
+tf32: true                     # A100+ 加速矩阵乘
+
+# ---- 内存优化 ----
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false         # 新版 PyTorch 推荐，更稳
+flash_attention: true          # 装不上就改 sdp_attention: true
+sdp_attention:
+
+# ---- LoRA+ (可选，比普通 LoRA 快 2×) ----
+# loraplus_lr_ratio: 16
+
+# ---- 模板（Qwen 用 chatml） ----
+chat_template: chatml
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+# ---- 评估 / 保存 ----
+evals_per_epoch: 4
+saves_per_epoch: 2
+save_total_limit: 3
+logging_steps: 10
+eval_table_size: 5             # eval 时打印几条样例输出到终端
+
+# ---- 其它 ----
+seed: 42
+early_stopping_patience: 3
+resume_from_checkpoint:        # 留空 = 从头；填 checkpoint 路径可续训

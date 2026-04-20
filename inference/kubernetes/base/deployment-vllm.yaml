@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+spec:
+  replicas: 2                         # 至少 2 副本才能做 rolling update
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0               # 始终保持所有副本可用
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+      annotations:
+        # 让 Prometheus Operator 刮指标
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # 调度到有 GPU 的节点
+      nodeSelector:
+        accelerator: nvidia-gpu
+      # 避免同一 GPU 节点上挤 2 个副本（PDB + HPA 才有意义）
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: vllm
+      # 权限最小化：非 root 用户跑
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--model"
+            - "/models/stage2_fused"           # 指向 PVC 挂载路径
+            - "--served-model-name"
+            - "stage2"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--gpu-memory-utilization"
+            - "0.9"
+            - "--max-model-len"
+            - "8192"
+            - "--dtype"
+            - "bfloat16"
+            - "--enable-chunked-prefill"
+            # —— LoRA 支持 ——
+            - "--enable-lora"
+            - "--max-loras"
+            - "4"
+            - "--max-lora-rank"
+            - "32"
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-credentials
+                  key: token
+                  optional: true
+          resources:
+            limits:
+              nvidia.com/gpu: 1               # 每 Pod 独占 1 张 GPU
+              memory: 24Gi
+              cpu: 4
+            requests:
+              nvidia.com/gpu: 1
+              memory: 16Gi
+              cpu: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120          # 大模型加载要时间
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: adapters
+              mountPath: /adapters
+              readOnly: true
+            - name: adapter-config
+              mountPath: /etc/vllm
+              readOnly: true
+            - name: shm
+              mountPath: /dev/shm             # vLLM 需要共享内存
+            - name: cache
+              mountPath: /root/.cache
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
+        - name: adapters
+          persistentVolumeClaim:
+            claimName: adapters
+        - name: adapter-config
+          configMap:
+            name: lora-adapters
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: cache
+          emptyDir: {}

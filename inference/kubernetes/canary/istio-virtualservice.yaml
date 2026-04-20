@@ -1,0 +1,60 @@
+# Istio VirtualService + DestinationRule
+# 场景：集群已经装了 Istio，直接在 Mesh 层做流量切分
+# 切流量：改 weight → kubectl apply
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: vllm-vs
+  namespace: ocr-inference
+spec:
+  hosts: [vllm]
+  http:
+    # 1. Beta tester header 强制走 canary
+    - match:
+        - headers:
+            x-beta-tester: { exact: "true" }
+      route:
+        - destination:
+            host: vllm
+            subset: canary
+
+    # 2. 普通流量：90/10
+    - route:
+        - destination:
+            host: vllm
+            subset: stable
+          weight: 90
+        - destination:
+            host: vllm
+            subset: canary
+          weight: 10
+      # 超时 / 重试（LLM 生成会慢，调大）
+      timeout: 300s
+      retries:
+        attempts: 2
+        perTryTimeout: 150s
+        retryOn: 5xx,reset
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vllm
+  namespace: ocr-inference
+spec:
+  host: vllm
+  subsets:
+    - name: stable
+      labels: { version: v1 }
+    - name: canary
+      labels: { version: v2 }
+  # 连接池：避免 vLLM 被打爆
+  trafficPolicy:
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 10
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s

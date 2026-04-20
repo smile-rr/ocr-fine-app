@@ -1,0 +1,76 @@
+# ============================================================
+# Stage 1: Qwen2-VL-2B-Instruct QLoRA 微调 (VLM)
+# 作用：输入表格图片 → 输出 Markdown 表格 (sharegpt 多模态格式)
+# 适用：Linux + NVIDIA GPU (8GB+ VRAM)
+# 参考：https://github.com/hiyouga/LLaMA-Factory/blob/main/examples/train_qlora/qwen2vl_lora_sft.yaml
+# ============================================================
+
+### 模型 ###
+model_name_or_path: Qwen/Qwen2-VL-2B-Instruct
+# 7B 版：Qwen/Qwen2-VL-7B-Instruct (需要 ~20GB VRAM with QLoRA)
+trust_remote_code: true
+
+### 训练方式 ###
+stage: sft
+do_train: true
+finetuning_type: lora
+
+### LoRA 超参 ###
+lora_rank: 16                  # VLM 建议 rank 比纯文本大些
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target: all               # 或 q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+
+### 视觉相关 ###
+visual_inputs: true            # 开启多模态
+freeze_vision_tower: true      # 冻结 ViT encoder，只训 LLM 部分
+                               # 设 false 会把 ViT 也加进 LoRA，显存翻倍且容易过拟合
+                               # 一般只有 CLIP 不适合你任务时才解冻
+image_resolution: 336          # 限制图片 token 数，防止占满上下文
+
+### QLoRA 量化 ###
+quantization_bit: 4
+quantization_type: nf4
+double_quantization: true
+
+### 数据 ###
+dataset: stage1_table_extraction
+eval_dataset: stage1_table_extraction_val
+template: qwen2_vl             # 必须用 qwen2_vl，不能用 qwen（多模态 token 不一样）
+cutoff_len: 4096               # 图片 ≈ 800-1500 tokens，要给文本留余地
+max_samples: 5000
+
+### 输出 ###
+output_dir: outputs/stage1_lora
+overwrite_output_dir: true
+logging_steps: 10
+save_steps: 200
+save_total_limit: 3
+plot_loss: true
+
+### 训练超参 ###
+per_device_train_batch_size: 1        # VLM 图片占显存大，通常只能 1
+gradient_accumulation_steps: 16       # 有效 batch = 16
+learning_rate: 1.0e-4                 # VLM 比纯文本保守点
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+### 精度与优化 ###
+bf16: true
+flash_attn: fa2
+optim: adamw_torch
+gradient_checkpointing: true
+
+### 评估 ###
+val_size: 0.0
+evaluation_strategy: steps
+eval_steps: 100
+per_device_eval_batch_size: 1
+
+### 其它 ###
+seed: 42
+ddp_timeout: 180000000
+preprocessing_num_workers: 2          # VLM 图片预处理慢，不要开太多 worker 内存会爆

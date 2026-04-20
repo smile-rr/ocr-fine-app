@@ -1,0 +1,111 @@
+# 方案 C：自定义 CRD —— 让 LoRA adapter 成为 K8s 一等公民
+# 用法: kubectl apply -f crd-loraadapter.yaml
+# 然后可以:
+#   kubectl get loraadapters
+#   kubectl describe loraadapter stage2-v3
+#   kubectl delete loraadapter stage2-v3
+# 但 ⚠️ 仅定义 CRD 不够 —— 需要配套一个 controller/operator 监听这个 CR 并执行动作
+# Controller 代码不在本仓（参考 KServe 或自己用 kubebuilder 写）
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: loraadapters.ml.example.com
+spec:
+  group: ml.example.com
+  scope: Namespaced
+  names:
+    kind: LoRAAdapter
+    plural: loraadapters
+    singular: loraadapter
+    shortNames:
+      - lora
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [baseModel, weightsURI, targetService]
+              properties:
+                baseModel:
+                  type: string
+                  description: "base 模型的 HF repo id 或本地路径"
+                weightsURI:
+                  type: string
+                  description: "adapter 权重来源：s3://, gs://, oci:// 或 PVC 路径"
+                targetService:
+                  type: string
+                  description: "目标 vLLM Service name"
+                rank:
+                  type: integer
+                  default: 16
+                traffic:
+                  type: object
+                  description: "金丝雀：这个 adapter 接多少流量"
+                  properties:
+                    percent:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                owner:
+                  type: string
+                  description: "owner team/contact (审计)"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Downloading, Loaded, Failed, Unloading]
+                loadedAt:
+                  type: string
+                  format: date-time
+                servingReplicas:
+                  type: integer
+                message:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type: { type: string }
+                      status: { type: string }
+                      lastTransitionTime: { type: string, format: date-time }
+                      reason: { type: string }
+                      message: { type: string }
+      additionalPrinterColumns:
+        - name: Base
+          type: string
+          jsonPath: .spec.baseModel
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Traffic
+          type: integer
+          jsonPath: .spec.traffic.percent
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+
+---
+# 示例 CR —— 运维直接 kubectl apply 这个，controller 会把它同步到 vLLM
+apiVersion: ml.example.com/v1
+kind: LoRAAdapter
+metadata:
+  name: stage2-v3
+  namespace: ocr-inference
+  annotations:
+    git-commit: "abc1234"
+    changelog: "Trained on 2026-04 financial Q3 data"
+spec:
+  baseModel: Qwen/Qwen2.5-7B-Instruct
+  weightsURI: s3://ml-artifacts/adapters/stage2-v3/
+  targetService: vllm
+  rank: 16
+  traffic:
+    percent: 10                     # 金丝雀：10% 流量走这个 adapter
+  owner: nlp-team@example.com

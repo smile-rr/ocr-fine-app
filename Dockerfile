@@ -73,7 +73,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # 拷贝源码（模型通过 volume 挂载，不打进 image）
 COPY src/ /app/src/
-COPY pyproject.toml README.md /app/
+COPY pyproject.toml /app/
 
 RUN mkdir -p /app/models /app/chroma_db /app/.cache \
     && chown -R app:app /app

@@ -1,0 +1,30 @@
+# 模型权重和 adapter 的持久化存储
+# 生产上一般用 RWX (ReadWriteMany) 挂给多个 Pod 共享
+# StorageClass 根据集群选：
+#   - AWS EKS: efs-sc
+#   - GKE:     standard-rwx 或 filestore-csi
+#   - 本地:    rook-cephfs / nfs-csi / longhorn
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models
+spec:
+  accessModes:
+    - ReadWriteMany        # 多 Pod 共读 base；写由 admin Job 独占
+  storageClassName: ""     # 按集群填；留空走集群默认
+  resources:
+    requests:
+      storage: 200Gi       # 7B 模型 ~15GB fp16；留 adapter + 多版本余量
+---
+# adapter 专用 PVC（和 base 分开，便于 GitOps 独立管理）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: adapters
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 20Gi        # adapter 通常 <100MB，留足版本历史

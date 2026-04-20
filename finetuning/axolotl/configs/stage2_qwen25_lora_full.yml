@@ -1,0 +1,65 @@
+# ============================================================
+# Stage 2: 对照组 — 纯 LoRA (非量化) 版
+# 用途：显存充裕时（>20GB）跑这个，精度比 QLoRA 好 0.5-1%
+# 与 stage2_qwen25_qlora.yml 的差异只在 adapter 和量化几行（已标注）
+# ============================================================
+
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+trust_remote_code: true
+
+# ---- 改点 1: adapter 类型改回普通 lora ----
+adapter: lora
+# load_in_4bit: true          # ← 注释掉，不做 4bit 量化
+# load_in_8bit: true
+
+# ---- LoRA 超参（可以比 QLoRA 大一些，因为显存够） ----
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_linear: true
+
+# ---- 改点 2: 没有 bnb_* 量化细节 ----
+
+datasets:
+  - path: ../../../data/stage2_train/train.jsonl
+    type: alpaca
+    ds_type: json
+dataset_prepared_path: ./cache/prepared
+val_set_size: 0.05
+output_dir: ./outputs/stage2_lora_full
+
+sequence_len: 2048
+sample_packing: true
+eval_sample_packing: false
+pad_to_sequence_len: true
+
+# ---- 改点 3: batch 可以稍大 ----
+micro_batch_size: 4
+gradient_accumulation_steps: 4
+num_epochs: 3
+optimizer: adamw_torch         # 非量化场景用普通 adamw
+lr_scheduler: cosine
+learning_rate: 0.0002
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+bf16: true
+tf32: true
+
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+flash_attention: true
+
+chat_template: chatml
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+evals_per_epoch: 4
+saves_per_epoch: 2
+save_total_limit: 3
+logging_steps: 10
+seed: 42

@@ -1,0 +1,44 @@
+# HorizontalPodAutoscaler —— 按 GPU 利用率扩缩容
+# 前提：集群装了 DCGM Exporter + Prometheus Adapter，才能把 GPU 指标当 HPA 指标
+# 没装就退化到按 CPU 扩缩，但 LLM 服务 CPU 不是瓶颈，不建议
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    # GPU 利用率 (需 DCGM exporter + Prometheus Adapter)
+    - type: Pods
+      pods:
+        metric:
+          name: DCGM_FI_DEV_GPU_UTIL
+        target:
+          type: AverageValue
+          averageValue: "70"     # 平均 GPU 利用率超 70% 就扩
+    # 或者按 vLLM 暴露的 queue 长度（更精准）
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: vllm_num_requests_waiting
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "5"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300     # 缩容保守，避免抖动
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

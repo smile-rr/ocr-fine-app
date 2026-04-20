@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ocr-inference
+  labels:
+    # 给 NetworkPolicy 用
+    name: ocr-inference
+    # 告诉 Istio / Linkerd 注入 sidecar（用到时开）
+    # istio-injection: enabled

@@ -1,0 +1,84 @@
+# OpenShift AI (RHOAI) + KServe 的玩法 —— 一个 CR 搞定 vLLM 部署 + 金丝雀
+# 前置:
+#   - OpenShift 集群装了 Red Hat OpenShift AI (RHOAI) Operator
+#   - DataScienceCluster CR 中启用了 KServe + Serverless (Knative)
+#
+# 本文件展示 KServe InferenceService 的几个典型模式
+
+---
+# 模式 1: 最简 vLLM 部署
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: stage2
+  namespace: ocr-inference
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment        # 或 Serverless (scale-to-zero)
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      # 从 OCI registry / S3 / PVC 拉模型
+      storage:
+        key: localMinIO                                      # StorageKey 在 config-deploy ConfigMap 里定义
+        path: stage2_fused/
+      args:
+        - --dtype=bfloat16
+        - --max-model-len=8192
+        - --enable-chunked-prefill
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+          memory: 24Gi
+        requests:
+          nvidia.com/gpu: 1
+          memory: 16Gi
+
+---
+# 模式 2: 金丝雀发布（KServe 原生）
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: stage2
+  namespace: ocr-inference
+spec:
+  predictor:
+    # 金丝雀：新版本接 10% 流量
+    canaryTrafficPercent: 10
+    model:
+      modelFormat: { name: vLLM }
+      storage: { key: localMinIO, path: stage2_v2/ }          # v2 模型路径
+      resources:
+        limits: { nvidia.com/gpu: 1 }
+
+---
+# 模式 3: LoRA 多 adapter（KServe 0.13+ 原生支持）
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: stage2-multi-tenant
+  namespace: ocr-inference
+spec:
+  predictor:
+    model:
+      modelFormat: { name: vLLM }
+      storage: { key: localMinIO, path: qwen2.5-7b-base/ }
+      args:
+        - --enable-lora
+        - --max-loras=8
+      # 多 adapter 声明（KServe 会把它们挂到 PVC 里并加载）
+      storageUri: oci://registry.example.com/adapters:latest
+      env:
+        - name: LORA_MODULES
+          value: "tenant-a=/adapters/a,tenant-b=/adapters/b,tenant-c=/adapters/c"
+      resources:
+        limits: { nvidia.com/gpu: 1 }
+
+# KServe 帮你做了什么:
+#   ✅ 起 Deployment + Service + Route
+#   ✅ 金丝雀流量切分（基于 Knative Service 的 traffic spec）
+#   ✅ Scale-to-zero（Serverless 模式）
+#   ✅ 模型从 S3/OCI 下载到 Pod local
+#   ✅ 指标集成到 OpenShift Monitoring
+#   ✅ 灰度发布期间自动 health check

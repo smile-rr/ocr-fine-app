@@ -1,0 +1,19 @@
+# kubectl apply -k inference/kubernetes/base/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ocr-inference
+
+resources:
+  - namespace.yaml
+  - pvc-models.yaml
+  - configmap-adapters.yaml
+  - deployment-vllm.yaml
+  - service-vllm.yaml
+  - networkpolicy.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: ocr-fine-app
+  app.kubernetes.io/component: inference

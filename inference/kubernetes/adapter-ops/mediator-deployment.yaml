@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adapter-controller
+  namespace: ocr-inference
+  labels:
+    app: adapter-controller
+spec:
+  replicas: 2                    # 无状态，多副本就行
+  selector:
+    matchLabels:
+      app: adapter-controller
+  template:
+    metadata:
+      labels:
+        app: adapter-controller  # NetworkPolicy 要匹配这个 label
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: api
+          # 构建: docker build -t your-registry/adapter-mediator:v1 -f mediator.Dockerfile .
+          image: your-registry/adapter-mediator:v1
+          ports:
+            - containerPort: 8080
+          env:
+            - name: VLLM_INTERNAL_URL
+              value: "http://vllm.ocr-inference.svc.cluster.local:8000"
+            - name: OIDC_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: oidc-config
+                  key: issuer
+            - name: OIDC_AUDIENCE
+              value: "vllm-admin"
+            - name: ADAPTER_PVC_PATH
+              value: "/adapters"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adapter-controller
+  namespace: ocr-inference
+spec:
+  type: ClusterIP
+  selector:
+    app: adapter-controller
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Ingress —— 对外暴露，前面接 OIDC Proxy (oauth2-proxy / OpenShift OAuth Proxy)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adapter-controller
+  namespace: ocr-inference
+  annotations:
+    # OIDC 认证由 Ingress 控制器的 auth annotation 实现（nginx 示例）
+    nginx.ingress.kubernetes.io/auth-url: "https://oauth2-proxy.auth.svc.cluster.local/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://auth.example.com/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Access-Token"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts: [vllm-admin.example.com]
+      secretName: vllm-admin-tls
+  rules:
+    - host: vllm-admin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adapter-controller
+                port:
+                  number: 80

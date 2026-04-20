@@ -1,0 +1,30 @@
+# ArgoCD Application —— 监听 Git 里的 adapter 清单
+# 前置：集群装了 ArgoCD (argoproj/argo-cd)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ocr-adapter-config
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR-ORG/ocr-fine-app
+    path: inference/kubernetes/base
+    targetRevision: main
+    directory:
+      include: 'configmap-adapters.yaml'      # 只同步 adapter ConfigMap
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ocr-inference
+  syncPolicy:
+    automated:
+      prune: true                              # 删 YAML 里没有的 adapter
+      selfHeal: true                           # 手动改 cluster 会被 revert 回 Git 状态
+    syncOptions:
+      - CreateNamespace=false
+      - PrunePropagationPolicy=foreground
+    # ConfigMap 变化触发 Hook Job（见 gitops-sync-job.yaml）
+    retry:
+      limit: 3

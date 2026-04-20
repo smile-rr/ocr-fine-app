@@ -1,0 +1,18 @@
+# ⭐ vLLM 只暴露 ClusterIP —— 外部不可直接访问
+# 业务层（app-layer）通过 svc DNS "vllm.ocr-inference.svc.cluster.local:8000" 调
+# 这是热加载/admin 接口安全性的第一道防线
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  type: ClusterIP                      # 不要 LoadBalancer / NodePort
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: vllm

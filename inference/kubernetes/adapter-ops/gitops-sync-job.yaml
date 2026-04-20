@@ -1,0 +1,87 @@
+# adapter-sync-job —— ConfigMap 变化时触发，在集群内部调 vLLM 加载/卸载 adapter
+# 触发方式二选一：
+#   方式 A（推荐）: ArgoCD PostSync Hook（annotation: argocd.argoproj.io/hook: PostSync）
+#   方式 B: stakater/Reloader 监听 ConfigMap 重启 Deployment（缺点：要重启 Pod）
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: adapter-sync
+  namespace: ocr-inference
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  ttlSecondsAfterFinished: 3600      # 1 小时后自动清理
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: adapter-syncer      # 下面定义的 SA
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: sync
+          image: curlimages/curl:latest
+          env:
+            - name: VLLM_URL
+              value: "http://vllm.ocr-inference.svc.cluster.local:8000"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "[$(date)] Starting adapter sync..."
+
+              # 读 ConfigMap 挂载的 adapters.yaml
+              # 遍历 spec.adapters[] → 调 vLLM load_lora_adapter
+              #
+              # 简化示例：这里只演示逻辑；生产上建议换成 python Job，
+              # 用 PyYAML 解析 + diff 当前已加载的 adapter（GET /v1/models）
+
+              # 列出期望的 adapters
+              DESIRED=$(grep -A1 'name:' /etc/vllm/adapters.yaml | \
+                        awk '/name:/ {name=$2} /path:/ {print name"="$2}')
+
+              # 当前已加载的 adapters
+              LOADED=$(curl -s "$VLLM_URL/v1/models" | \
+                       python -c "import sys,json; \
+                       data=json.load(sys.stdin); \
+                       print('\n'.join(m['id'] for m in data['data']))")
+
+              echo "Desired: $DESIRED"
+              echo "Loaded: $LOADED"
+
+              # 加载缺失的
+              echo "$DESIRED" | while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                name="${line%%=*}"
+                path="${line#*=}"
+                if echo "$LOADED" | grep -qx "$name"; then
+                  echo "  $name already loaded, skip"
+                else
+                  echo "  Loading $name from $path"
+                  curl -fsS -X POST "$VLLM_URL/v1/load_lora_adapter" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"lora_name\":\"$name\",\"lora_path\":\"$path\"}"
+                fi
+              done
+
+              # 卸载 Git 里删掉的（实现略，类似逻辑 diff 后调 /v1/unload_lora_adapter）
+              echo "[$(date)] Sync done."
+          volumeMounts:
+            - name: adapter-config
+              mountPath: /etc/vllm
+              readOnly: true
+      volumes:
+        - name: adapter-config
+          configMap:
+            name: lora-adapters
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: adapter-syncer
+  namespace: ocr-inference
+# SA 本身无特殊权限；它的 Pod 靠 NetworkPolicy 允许访问 vllm svc
+# 这里不挂 RBAC，避免权限蔓延

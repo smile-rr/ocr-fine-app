@@ -61,6 +61,14 @@ colab = [
     "bitsandbytes>=0.43.0",
     "trl>=0.11.0",
 ]
+# V2 PDF 抽取（Docling + MinerU + Contextual Retrieval）：uv sync --extra extract
+# 首次用会下 ~2GB 模型到 ~/.cache/huggingface
+# openai SDK 用于调 Ollama/Azure OpenAI 做 Contextual Retrieval
+extract = [
+    "docling>=2.0.0",
+    "mineru[core]>=2.0.0",
+    "openai>=1.50.0",
+]
 # 非 Apple Silicon 本地：uv sync --extra no-mlx
 # （先从 dependencies 移除 mlx 再用。这里保留说明；实际请手动编辑。）
 

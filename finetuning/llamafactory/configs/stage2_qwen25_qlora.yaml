@@ -1,0 +1,76 @@
+# ============================================================
+# Stage 2: Qwen2.5-0.5B-Instruct QLoRA 微调
+# 作用：表格感知问答 (alpaca 格式, {instruction, input, output})
+# 适用：Linux + NVIDIA GPU (4GB+ VRAM)
+# ============================================================
+
+### 模型 ###
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+# 7B 以上换成 Qwen/Qwen2.5-7B-Instruct；VRAM 不够 → 走 quantization_bit: 4
+trust_remote_code: true
+
+### 训练方式 ###
+stage: sft                    # sft / pt(pretrain) / rm / ppo / dpo / kto / orpo
+do_train: true
+finetuning_type: lora         # lora / full / freeze
+
+### LoRA 超参 ###
+lora_rank: 8
+lora_alpha: 16                # 通常 = 2 * rank
+lora_dropout: 0.05
+# 覆盖所有 linear 层（包括 MLP）效果最好；只挂 QV 会明显欠拟合
+lora_target: all              # 或显式: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+
+### QLoRA 量化 ###
+quantization_bit: 4           # 4 / 8 / null
+quantization_type: nf4        # nf4 / fp4；nf4 更适合神经网络权重
+double_quantization: true     # 对 quantization 常数再量化，再省 0.4 bit/param
+
+### 数据 ###
+dataset: stage2_table_qa
+# 可以多个数据集叠加：dataset: stage2_table_qa,alpaca_zh,self_cognition
+eval_dataset: stage2_table_qa_val
+template: qwen                # Qwen2.5 用 qwen；Llama3 用 llama3；ChatGLM 用 glm4 ...
+cutoff_len: 2048              # 训练时最大 token 长度
+max_samples: 10000            # 截取数据集前 N 条，调试时改成 200 快速跑通
+
+### 输出 ###
+output_dir: outputs/stage2_lora
+overwrite_output_dir: true
+logging_steps: 10
+save_steps: 200
+save_total_limit: 3           # 只保留最近 3 个 checkpoint
+plot_loss: true               # 训完自动画 loss 曲线到 PNG
+
+### 训练超参 ###
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8     # 有效 batch = 2 * 8 = 16
+learning_rate: 2.0e-4              # LoRA 标准值，比全参微调大 10×
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+### 精度与优化 ###
+bf16: true                         # A100/H100/3090 以上 bf16；T4/V100 用 fp16
+# fp16: true                       # 低端卡用这个
+flash_attn: fa2                    # fa2 / sdpa (PyTorch 内置) / auto
+# flash_attn: sdpa                 # flash-attn 装不上就用这个
+optim: adamw_torch                 # adamw_torch / adamw_bnb_8bit (省显存) / adafactor
+gradient_checkpointing: true       # 省 50% 显存，慢 20-30%
+
+### 序列打包（短样本拼接，提 2-3× 吞吐）###
+packing: false                     # 对齐样本会损失一点精度；数据集平均长度长时开
+neat_packing: false                # 更严格的 packing，配合 packing=true 用
+
+### 评估 ###
+val_size: 0.0                      # 如果用了 eval_dataset 这里设 0；否则自动从 train 切
+evaluation_strategy: steps
+eval_steps: 100
+per_device_eval_batch_size: 4
+
+### 其它 ###
+seed: 42
+ddp_timeout: 180000000             # 多卡时防超时
+preprocessing_num_workers: 4

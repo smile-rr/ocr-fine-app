@@ -1,0 +1,23 @@
+# ⭐ adapter 清单 —— 当前该加载哪些 LoRA
+# 这个 ConfigMap 就是 adapter-ops 的「单一事实源」（Single Source of Truth）
+# GitOps 流程：改这个 YAML → Git commit → ArgoCD sync → Operator/Reloader 通知 vLLM
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lora-adapters
+  annotations:
+    # 当 ConfigMap 变化时，stakater/Reloader 会自动滚动更新 Deployment
+    # 或者由自定义 adapter-controller 监听并调 vLLM 内部接口（见 adapter-ops/）
+    reloader.stakater.com/match: "true"
+data:
+  # 这里声明所有该挂载的 adapter
+  # 格式: adapter_name: adapter_path（相对 /adapters PVC 挂载点）
+  adapters.yaml: |
+    version: "2026-04-19"
+    adapters:
+      - name: stage2-prod
+        path: /adapters/stage2-prod/          # 指向 PVC 中的目录
+        base_model: Qwen/Qwen2.5-7B-Instruct
+      - name: stage2-canary
+        path: /adapters/stage2-v2-rc1/
+        base_model: Qwen/Qwen2.5-7B-Instruct

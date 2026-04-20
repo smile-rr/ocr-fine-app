@@ -1,0 +1,53 @@
+# OpenShift Route 替代 K8s Ingress
+# 特点：自带 HAProxy、支持 alternateBackends 做金丝雀、支持 re-encrypt
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vllm-admin
+  namespace: ocr-inference
+  annotations:
+    # LLM 生成可能需要几十秒，默认 30s 超时不够
+    haproxy.router.openshift.io/timeout: "300s"
+    # 流式输出需要 SSE
+    haproxy.router.openshift.io/buffer-req-headers: "false"
+    # 限速（每个 IP 每秒）
+    haproxy.router.openshift.io/rate-limit-connections: "true"
+    haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "20"
+    haproxy.router.openshift.io/rate-limit-connections.rate-http: "10"
+spec:
+  host: vllm-admin.apps.example.com
+  tls:
+    termination: edge                    # HAProxy 解 TLS，内部 HTTP
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: adapter-controller
+    weight: 100
+  port:
+    targetPort: 8080
+
+---
+# 金丝雀 Route 示例：不用 Argo Rollouts / Istio 的最简方案
+# 改 weight + oc apply 即完成流量切分
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vllm-serving
+  namespace: ocr-inference
+  annotations:
+    haproxy.router.openshift.io/timeout: "300s"
+spec:
+  host: vllm.apps.example.com
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: vllm-stable
+    weight: 90                           # 90% 流量
+  alternateBackends:
+    - kind: Service
+      name: vllm-canary
+      weight: 10                         # 10% 流量
+  port:
+    targetPort: 8000
