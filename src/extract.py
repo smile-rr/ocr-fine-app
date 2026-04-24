@@ -1,25 +1,27 @@
-"""新一代 PDF 抽取 —— Docling (文本) + MinerU (扫描) 双引擎 + 跨页表格合并.
+"""PDF / image extraction — multiple peer engines, no auto routing.
 
-和老的 src/pdf_utils.py 并存，不动老代码。
+Engines exposed (caller picks one explicitly):
+    - pdfplumber       : text-PDF tables only (legacy baseline)
+    - pymupdf4llm      : text-PDF -> LLM-grade Markdown (fastest full-doc)
+    - docling          : layout-aware, auto-OCR fallback, hierarchy + bbox
+    - mineru           : best on Chinese / scans / cross-page tables (2026)
+    - vision_llm:local : local Qwen2-VL (MLX/HF) on rendered pages
+    - vision_llm:openai: OpenAI gpt-4o-vision on rendered pages
 
-核心流程:
-    extract_document(pdf_path, engine="auto")
-    ├── detect_pdf_type  → text / scanned
-    ├── engine.extract   → list[DocElement] (统一 schema)
-    └── merge_cross_page_tables
+Core entry:
+    extract_document(pdf_path, engine=...)  -> list[DocElement]
+    to_markdown(elements)                   -> str    (LLM-ready)
 
-返回的 DocElement 流可以直接喂给 chunking.py。
-
-装依赖:
-    uv sync --extra extract
-
-文档:
-    docs/pdf-extraction-2026.md
+The DocElement stream still feeds chunking.py for the existing RAG path.
+detect_pdf_type() is kept for UI hints only — it never auto-routes.
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -31,6 +33,17 @@ import fitz  # PyMuPDF
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# Engine IDs exposed in UI / CLI
+ENGINES = (
+    "pdfplumber",
+    "pymupdf4llm",
+    "docling",
+    "mineru",
+    "vision_llm:local",
+    "vision_llm:openai",
+)
 
 
 # ============================================================
@@ -223,14 +236,290 @@ def _docling_item_to_element(item: Any, idx: int) -> DocElement | None:
 
 
 # ============================================================
+# pdfplumber 引擎 —— 文本 + 表格（全页内容）
+# ============================================================
+def extract_with_pdfplumber(pdf_path: str | Path) -> list[DocElement]:
+    """Full pdfplumber extraction: per-page text PARAGRAPH + per-table TABLE.
+
+    pdfplumber has BOTH `page.extract_text()` and `page.extract_tables()`;
+    earlier versions of this engine only used the latter. We now emit:
+      - one PARAGRAPH per page (full text, including paragraphs the other
+        engines see), in reading order
+      - one TABLE per detected table (after the page's paragraph)
+
+    Both come from pdfplumber's text layer — no OCR. Returns [] only when
+    the PDF has no text layer at all (scanned).
+    """
+    import pdfplumber
+    from .pdf_utils import rows_to_markdown
+
+    pdf_path = Path(pdf_path)
+    elements: list[DocElement] = []
+    table_idx = 0
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for pi, page in enumerate(pdf.pages, 1):
+                # 1) Page text as PARAGRAPH (best-effort; pdfplumber returns ""
+                #    on text-less pages)
+                try:
+                    text = (page.extract_text() or "").strip()
+                except Exception as e:
+                    logger.warning(f"pdfplumber page {pi} text failed: {e}")
+                    text = ""
+                if text:
+                    elements.append(DocElement(
+                        type=ElementType.PARAGRAPH,
+                        text=text,
+                        page=pi,
+                        id=f"pp_p_{pi}",
+                    ))
+
+                # 2) Tables as TABLE elements
+                try:
+                    tables = page.extract_tables() or []
+                except Exception as e:
+                    logger.warning(f"pdfplumber page {pi} tables failed: {e}")
+                    tables = []
+                for t in tables:
+                    if not t or len(t) < 2:
+                        continue
+                    headers = [(h or "").strip() for h in t[0]]
+                    rows = [[(c or "").strip() for c in r] for r in t[1:]]
+                    df = None
+                    try:
+                        if headers and rows:
+                            df = pd.DataFrame(rows, columns=headers)
+                    except Exception:
+                        df = None
+                    elements.append(DocElement(
+                        type=ElementType.TABLE,
+                        text=rows_to_markdown(headers, rows),
+                        page=pi,
+                        id=f"pp_table_{table_idx}",
+                        data=df,
+                    ))
+                    table_idx += 1
+    except Exception as e:
+        logger.error(f"pdfplumber open {pdf_path} failed: {e}")
+
+    n_tables = sum(1 for e in elements if e.type == ElementType.TABLE)
+    n_paras = sum(1 for e in elements if e.type == ElementType.PARAGRAPH)
+    logger.info(f"pdfplumber -> {n_paras} paragraphs + {n_tables} tables")
+    return elements
+
+
+# ============================================================
+# pymupdf4llm 引擎 —— 整篇文档 -> markdown -> DocElement[]
+# ============================================================
+def extract_with_pymupdf4llm(pdf_path: str | Path) -> list[DocElement]:
+    """Fast native-text PDF → Markdown. No OCR.
+
+    pymupdf4llm.to_markdown returns one big markdown string covering all
+    pages. We split on page-break markers (PyMuPDF inserts `-----` between
+    pages by default with `page_chunks=True`) and emit per-page elements.
+    Tables and headings are *kept inline* in the page paragraph rather than
+    re-parsed — pymupdf4llm already puts markdown tables / `#` headings into
+    the text stream, and downstream `to_markdown()` simply concatenates.
+    """
+    try:
+        import pymupdf4llm
+    except ImportError as e:
+        raise RuntimeError(
+            "pymupdf4llm 未安装。运行: uv sync --extra extract"
+        ) from e
+
+    pdf_path = Path(pdf_path)
+    logger.info(f"pymupdf4llm extracting {pdf_path.name}")
+    # page_chunks=True returns list[dict] with per-page text + metadata
+    chunks = pymupdf4llm.to_markdown(str(pdf_path), page_chunks=True)
+
+    elements: list[DocElement] = []
+    for idx, ch in enumerate(chunks):
+        text = (ch.get("text") or "").strip()
+        if not text:
+            continue
+        # pymupdf4llm pages are 0-based in metadata
+        page = int(ch.get("metadata", {}).get("page", idx)) + 1
+        elements.append(DocElement(
+            type=ElementType.PARAGRAPH,
+            text=text,
+            page=page,
+            id=f"p4l_page_{page}",
+        ))
+    logger.info(f"pymupdf4llm -> {len(elements)} page-chunks")
+    return elements
+
+
+# ============================================================
+# vision_llm 引擎 —— 渲染每页 -> 多模态 LLM -> markdown
+# ============================================================
+_VISION_PROMPT = (
+    "Extract ALL content from this page as well-structured Markdown. "
+    "Preserve headings (# / ##), paragraphs, lists, and especially tables "
+    "(use proper Markdown table syntax). Do not invent content; output "
+    "only what is visible in the image. If the page is blank, output an "
+    "empty string."
+)
+
+
+def _render_pdf_pages(pdf_path: Path, dpi: int = 200) -> list[tuple[int, "PIL.Image.Image"]]:
+    """Render each PDF page to a PIL Image. Returns [(page_no_1based, img), ...]."""
+    from PIL import Image
+    doc = fitz.open(pdf_path)
+    zoom = dpi / 72
+    mat = fitz.Matrix(zoom, zoom)
+    out: list[tuple[int, Any]] = []
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        out.append((i + 1, img))
+    doc.close()
+    return out
+
+
+def _is_image(path: Path) -> bool:
+    return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp"}
+
+
+def extract_with_vision_llm(
+    pdf_path: str | Path,
+    provider: str = "local",
+    dpi: int = 200,
+    max_tokens: int = 2048,
+) -> list[DocElement]:
+    """Multimodal LLM as an extractor. Treats each page (or the input image)
+    as one PARAGRAPH DocElement containing the LLM's markdown.
+
+    provider:
+      - "local"  : reuse src/infer.py:load_vlm() (MLX or HF Qwen2-VL)
+      - "openai" : OpenAI gpt-4o-class vision via OPENAI_API_KEY
+                   (override model with VISION_OPENAI_MODEL, default gpt-4o-mini)
+    """
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(pdf_path)
+
+    # Build (page_no, PIL.Image) list for both PDF and direct image input
+    if _is_image(pdf_path):
+        from PIL import Image
+        pages = [(1, Image.open(pdf_path).convert("RGB"))]
+    else:
+        pages = _render_pdf_pages(pdf_path, dpi=dpi)
+
+    if provider == "local":
+        markdowns = _vision_local(pages, max_tokens=max_tokens)
+    elif provider == "openai":
+        markdowns = _vision_openai(pages, max_tokens=max_tokens)
+    else:
+        raise ValueError(f"unknown vision_llm provider: {provider}")
+
+    elements: list[DocElement] = []
+    for page_no, md in markdowns:
+        if not md.strip():
+            continue
+        elements.append(DocElement(
+            type=ElementType.PARAGRAPH,
+            text=md.strip(),
+            page=page_no,
+            id=f"vlm_page_{page_no}",
+            metadata={"vision_provider": provider},
+        ))
+    logger.info(f"vision_llm[{provider}] -> {len(elements)} pages")
+    return elements
+
+
+def _vision_local(pages, max_tokens: int) -> list[tuple[int, str]]:
+    """Run local Qwen2-VL on each page via mlx_vlm or transformers."""
+    from .infer import load_vlm, _mlx_vlm_config, _unwrap_mlx
+    from . import config as C
+    backend, model, processor = load_vlm(adapter=None)
+    out: list[tuple[int, str]] = []
+    if backend == "mlx":
+        from mlx_vlm import generate as mlx_gen
+        from mlx_vlm.prompt_utils import apply_chat_template
+        cfg = _mlx_vlm_config(model, C.STAGE1_VLM_MLX)
+        with tempfile.TemporaryDirectory() as td:
+            for page_no, img in pages:
+                p = Path(td) / f"page_{page_no}.png"
+                img.save(p)
+                formatted = apply_chat_template(
+                    processor, config=cfg, prompt=_VISION_PROMPT, num_images=1,
+                )
+                result = mlx_gen(model, processor, formatted, image=[str(p)],
+                                 max_tokens=max_tokens, verbose=False)
+                out.append((page_no, _unwrap_mlx(result)))
+    else:
+        for page_no, img in pages:
+            messages = [{"role": "user", "content": [
+                {"type": "image"}, {"type": "text", "text": _VISION_PROMPT},
+            ]}]
+            text = processor.apply_chat_template(messages, add_generation_prompt=True)
+            inputs = processor(text=[text], images=[img],
+                               return_tensors="pt").to(model.device)
+            gen = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
+            md = processor.batch_decode(
+                gen[:, inputs.input_ids.shape[1]:], skip_special_tokens=True,
+            )[0]
+            out.append((page_no, md))
+    return out
+
+
+def _vision_openai(pages, max_tokens: int) -> list[tuple[int, str]]:
+    """Send each page image to OpenAI vision (or any OpenAI-compatible
+    endpoint that supports image_url with data: URIs)."""
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise RuntimeError("openai 未安装。运行: uv sync --extra extract") from e
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY 未设置。设置后再用 vision_llm:openai。"
+        )
+    base_url = os.environ.get("OPENAI_BASE_URL")  # optional, e.g. Azure / DashScope
+    model_name = os.environ.get("VISION_OPENAI_MODEL", "gpt-4o-mini")
+    client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+
+    out: list[tuple[int, str]] = []
+    for page_no, img in pages:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": _VISION_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ]}],
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        out.append((page_no, resp.choices[0].message.content or ""))
+    return out
+
+
+# ============================================================
 # MinerU 引擎（通过 CLI）
 # ============================================================
 def extract_with_mineru(pdf_path: str | Path,
                         work_dir: str | Path | None = None) -> list[DocElement]:
     """用 MinerU CLI 抽取，读它的 JSON 输出归一化。
 
-    MinerU 2.x 稳定 CLI: `mineru -p <pdf> -o <out_dir> -m auto`
-    输出: <out_dir>/<stem>/auto/<stem>_content_list.json
+    MinerU 2.x CLI flags we care about (run `mineru --help`):
+      -b BACKEND   pipeline | hybrid-auto-engine | vlm-auto-engine | ...
+                   `pipeline` is 5-10x faster than the default
+                   `hybrid-auto-engine`; default here = pipeline so
+                   MacBook users don't wait 70s/page.
+      -m METHOD    auto | txt | ocr   (only valid for `pipeline` / `hybrid-*`)
+                   `txt` skips OCR entirely — set MINERU_METHOD=txt for
+                   pure native-text PDFs.
+      -l LANG      ch | en | ...  (improves OCR accuracy)
+
+    Override via env vars:
+      MINERU_BACKEND  (default: pipeline)
+      MINERU_METHOD   (default: auto)
+      MINERU_LANG     (default: ch)
     """
     pdf_path = Path(pdf_path)
 
@@ -240,12 +529,20 @@ def extract_with_mineru(pdf_path: str | Path,
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"mineru extracting {pdf_path.name} -> {work_dir}")
+    # Defaults tuned for fast native-text PDFs on Apple Silicon. Override
+    # for scanned docs by setting MINERU_METHOD=ocr (or auto) and
+    # MINERU_LANG=ch when the input is Chinese.
+    backend = os.environ.get("MINERU_BACKEND", "pipeline")
+    method = os.environ.get("MINERU_METHOD", "txt")
+    lang = os.environ.get("MINERU_LANG", "en")
+
+    cmd = [
+        "mineru", "-p", str(pdf_path), "-o", str(work_dir),
+        "-b", backend, "-m", method, "-l", lang,
+    ]
+    logger.info(f"mineru extracting {pdf_path.name} -> {work_dir} ({' '.join(cmd[1:])})")
     try:
-        subprocess.run(
-            ["mineru", "-p", str(pdf_path), "-o", str(work_dir), "-m", "auto"],
-            check=True, capture_output=True,
-        )
+        subprocess.run(cmd, check=True, capture_output=True)
     except FileNotFoundError as e:
         raise RuntimeError(
             "mineru CLI 未找到。运行: uv sync --extra extract"
@@ -426,18 +723,19 @@ def _next_table(elements: list[DocElement], start: int) -> tuple[DocElement, int
 
 def _is_continuation(prev: DocElement, curr: DocElement,
                      page_height: float, edge_threshold: float) -> bool:
-    """两个表格是否构成跨页续接？"""
+    """两个表格是否构成跨页续接？需要 bbox 才能判断；缺 bbox 时一律不合并。"""
     if curr.page != prev.page + 1:
         return False
     if prev.data is None or curr.data is None:
         return False
     if prev.data.shape[1] != curr.data.shape[1]:
         return False
-    if prev.bbox and curr.bbox:
-        prev_bottom_gap = page_height - prev.bbox[3]
-        curr_top_gap = curr.bbox[1]
-        if prev_bottom_gap > edge_threshold or curr_top_gap > edge_threshold:
-            return False
+    if not (prev.bbox and curr.bbox):
+        return False
+    prev_bottom_gap = page_height - prev.bbox[3]
+    curr_top_gap = curr.bbox[1]
+    if prev_bottom_gap > edge_threshold or curr_top_gap > edge_threshold:
+        return False
     return True
 
 
@@ -499,44 +797,43 @@ def _combine_tables(cluster: list[DocElement]) -> DocElement:
 
 
 # ============================================================
-# 主入口
+# 主入口 —— 显式 engine（不再有 auto）
 # ============================================================
 def extract_document(
     pdf_path: str | Path,
-    engine: str = "auto",
+    engine: str,
     merge_tables: bool = True,
     llm_verify: callable | None = None,
 ) -> list[DocElement]:
-    """统一入口：路由 → 抽取 → 跨页合并 → 返回 DocElement 流。
+    """Dispatch to the named engine and return the DocElement stream.
 
     Args:
-        pdf_path: PDF 路径
-        engine: "auto" | "docling" | "mineru"
-        merge_tables: 是否做跨页表格合并
-        llm_verify: 可选的 LLM 跨页验证函数
-
-    Returns:
-        list[DocElement]
+        pdf_path: PDF or image path.
+        engine:   one of ENGINES — must be passed explicitly. No auto-routing.
+        merge_tables: only meaningful for engines that produce TABLE elements
+                      with bbox/data (docling, mineru). No-op for the others.
+        llm_verify:   optional LLM verifier for cross-page table merging.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise FileNotFoundError(pdf_path)
 
-    # 路由
-    if engine == "auto":
-        kind = detect_pdf_type(pdf_path)
-        engine = "docling" if kind == "text" else "mineru"
-        logger.info(f"auto-detected: {kind} -> using {engine}")
-
-    # 抽取
-    if engine == "docling":
+    if engine == "pdfplumber":
+        elements = extract_with_pdfplumber(pdf_path)
+    elif engine == "pymupdf4llm":
+        elements = extract_with_pymupdf4llm(pdf_path)
+    elif engine == "docling":
         elements = extract_with_docling(pdf_path)
     elif engine == "mineru":
         elements = extract_with_mineru(pdf_path)
+    elif engine.startswith("vision_llm:"):
+        provider = engine.split(":", 1)[1]
+        elements = extract_with_vision_llm(pdf_path, provider=provider)
     else:
-        raise ValueError(f"unknown engine: {engine}")
+        raise ValueError(
+            f"unknown engine: {engine!r}; choose one of {ENGINES}"
+        )
 
-    # 跨页合并
     if merge_tables:
         before = sum(1 for e in elements if e.type == ElementType.TABLE)
         elements = merge_cross_page_tables(elements, llm_verify=llm_verify)
@@ -548,16 +845,62 @@ def extract_document(
 
 
 # ============================================================
-# 调试: python -m src.extract path/to/file.pdf
+# to_markdown —— DocElement[] → 单一 markdown 文档（喂给字段抽取 LLM）
+# ============================================================
+def to_markdown(elements: list[DocElement]) -> str:
+    """Serialize a DocElement stream into one cohesive Markdown document.
+
+    Layout:
+      HEADING(level=L)  -> '\\n' + '#'*L + ' ' + text + '\\n'
+      PARAGRAPH         -> text + '\\n'
+      LIST              -> text + '\\n'
+      TABLE             -> '\\n<!-- table id=... page=... [cross_page] -->\\n'
+                           + markdown + '\\n'
+      CAPTION/FOOTNOTE  -> '> ' + text + '\\n'
+      FIGURE            -> '![caption](page-N)' + '\\n'
+      FORMULA           -> '$$ ... $$' + '\\n'
+
+    Designed for downstream LLM field extraction — preserves structure cheaply
+    and keeps a per-table breadcrumb the LLM can cite.
+    """
+    parts: list[str] = []
+    for el in elements:
+        if not el.text and el.type != ElementType.FIGURE:
+            continue
+        if el.type == ElementType.HEADING:
+            level = max(1, min(6, el.level or 2))
+            parts.append("\n" + "#" * level + " " + el.text + "\n")
+        elif el.type == ElementType.TABLE:
+            cp = " cross_page" if el.cross_page else ""
+            parts.append(
+                f"\n<!-- table id={el.id} page={el.page}{cp} -->\n{el.text}\n"
+            )
+        elif el.type == ElementType.LIST:
+            parts.append(el.text + "\n")
+        elif el.type in (ElementType.CAPTION, ElementType.FOOTNOTE):
+            parts.append("> " + el.text.replace("\n", "\n> ") + "\n")
+        elif el.type == ElementType.FIGURE:
+            cap = el.text or "figure"
+            parts.append(f"\n![{cap}](page-{el.page})\n")
+        elif el.type == ElementType.FORMULA:
+            parts.append(f"\n$$\n{el.text}\n$$\n")
+        else:  # PARAGRAPH / OTHER
+            parts.append(el.text + "\n")
+    return "".join(parts).strip() + "\n"
+
+
+# ============================================================
+# 调试: python -m src.extract <pdf> <engine>
 # ============================================================
 if __name__ == "__main__":
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    if len(sys.argv) < 2:
-        print("usage: python -m src.extract <pdf>")
+    if len(sys.argv) < 3:
+        print(f"usage: python -m src.extract <pdf> <engine>\n"
+              f"  engines: {' | '.join(ENGINES)}")
         sys.exit(1)
 
-    elements = extract_document(sys.argv[1])
+    elements = extract_document(sys.argv[1], engine=sys.argv[2])
     print(f"\n=== {len(elements)} elements ===")
     counts: dict[str, int] = {}
     for el in elements:
@@ -569,3 +912,7 @@ if __name__ == "__main__":
     for el in elements[:5]:
         preview = el.text[:120].replace("\n", " ")
         print(f"[p{el.page}] {el.type.value}: {preview}")
+
+    if len(sys.argv) > 3 and sys.argv[3] == "--md":
+        print("\n=== to_markdown() ===")
+        print(to_markdown(elements)[:2000])

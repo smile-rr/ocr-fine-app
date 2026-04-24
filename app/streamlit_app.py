@@ -35,9 +35,9 @@ with st.sidebar:
                                help="2026 推荐。文本+扫描自动路由，跨页合并，多粒度 chunking。")
     v2_engine = st.radio(
         "V2 引擎",
-        ["auto", "docling", "mineru"],
+        ["docling", "mineru"],
         horizontal=True, disabled=not use_docling,
-        help="auto=探测文本层; docling=文字 PDF; mineru=扫描件/中文复杂版式",
+        help="docling=文字 PDF / 自带 OCR fallback；mineru=扫描件 / 中文复杂版式。",
     )
     v2_contextual = st.checkbox(
         "⭐ Contextual Retrieval (Anthropic)", value=False, disabled=not use_docling,

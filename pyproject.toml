@@ -67,6 +67,7 @@ colab = [
 extract = [
     "docling>=2.0.0",
     "mineru[core]>=2.0.0",
+    "pymupdf4llm>=0.0.17",
     "openai>=1.50.0",
 ]
 # 非 Apple Silicon 本地：uv sync --extra no-mlx

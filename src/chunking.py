@@ -373,11 +373,11 @@ if __name__ == "__main__":
     from .extract import extract_document
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    if len(sys.argv) < 2:
-        print("usage: python -m src.chunking <pdf>")
+    if len(sys.argv) < 3:
+        print("usage: python -m src.chunking <pdf> <engine>")
         sys.exit(1)
 
-    elements = extract_document(sys.argv[1])
+    elements = extract_document(sys.argv[1], engine=sys.argv[2])
     chunks = chunk_document(elements, doc_id="test")
     print(f"\n{len(chunks)} chunks:")
     from collections import Counter

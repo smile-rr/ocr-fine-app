@@ -7,7 +7,7 @@
     from src.rag_v2 import Pipeline, OllamaContextGen
 
     pipe = Pipeline(
-        engine="auto",
+        engine="docling",
         contextual=True,
         context_gen=OllamaContextGen(model="qwen2.5:0.5b-instruct-q4_K_M"),
     )
@@ -65,7 +65,7 @@ class Pipeline:
         self,
         *,
         # 抽取
-        engine: str = "auto",              # auto / docling / mineru
+        engine: str = "docling",           # docling / mineru / pymupdf4llm / pdfplumber / vision_llm:*
         merge_tables: bool = True,
         # Chunking
         max_paragraph_tokens: int = 512,
@@ -113,14 +113,9 @@ class Pipeline:
         pdf_path = Path(pdf_path)
         self._lazy_init()
 
-        # 1. 抽取
+        # 1. 抽取（engine 显式由 caller 指定，不再 auto）
         t0 = time.time()
-        # 检测哪个引擎实际被用
         engine_used = self.engine
-        if engine_used == "auto":
-            from .extract import detect_pdf_type
-            engine_used = "docling" if detect_pdf_type(pdf_path) == "text" else "mineru"
-
         elements = extract_document(
             pdf_path, engine=engine_used, merge_tables=self.merge_tables,
         )
